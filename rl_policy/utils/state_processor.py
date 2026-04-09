@@ -23,6 +23,7 @@ class StateProcessor:
             supported_types = {
                 "h1",
                 "go2",
+                "g1_23dof",
                 "g1_29dof",
                 "h1-2_27dof",
                 "h1-2_21dof",

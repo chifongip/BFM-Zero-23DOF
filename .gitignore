@@ -2,3 +2,7 @@ pyvicon-datatstream-module
 unitree_sdk2_python
 __pycache__
 model/
+motivo_isaac.egg-info/
+results/
+.vscode/
+humanoidverse/
