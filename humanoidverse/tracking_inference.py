@@ -62,7 +62,7 @@ def main(model_folder: Path, data_path: Path | None = None, headless: bool = Tru
         {"actor_obs": torch.randn(1, model._actor.input_filter.output_space.shape[0] + model.cfg.archi.z_dim)},
         z_dim=model.cfg.archi.z_dim,
         history=('history_actor' in model.cfg.archi.actor.input_filter.key),
-        use_29dof=True,
+        use_29dof=False,
     )
     print(f"Exported model to {output_dir}/{model_name}.onnx")
 

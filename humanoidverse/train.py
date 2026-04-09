@@ -672,7 +672,7 @@ def train_bfm_zero():
             name='humanoidverse_isaac',
             device='cuda:0',
             # TODO this needs to be updated to point to a path with lafan dataset chunked into 10s clips
-            lafan_tail_path='humanoidverse/data/lafan_29dof_10s-clipped.pkl',
+            lafan_tail_path='humanoidverse/data/lafan_23dof_10s-clipped.pkl',
             enable_cameras=False,
             camera_render_save_dir='isaac_videos',
             max_episode_length_s=None,
@@ -680,7 +680,7 @@ def train_bfm_zero():
             disable_domain_randomization=False,
             relative_config_path='exp/bfm_zero/bfm_zero',
             include_last_action=True,
-            hydra_overrides=['robot=g1/g1_29dof_hard_waist', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', 'env.config.lie_down_init_prob=0.3'],
+            hydra_overrides=['robot=g1/g1_23dof_rev_1_0', 'robot.control.action_scale=0.25', 'robot.control.action_clip_value=5.0', 'robot.control.normalize_action_to=5.0', 'env.config.lie_down_init=True', 'env.config.lie_down_init_prob=0.3'],
             context_length=None,
             include_dr_info=False,
             included_dr_obs_names=None,

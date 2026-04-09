@@ -1,0 +1,5 @@
+motivo_isaac.egg-info/
+**/__pycache__/
+.vscode/
+results/
+humanoidverse/data/*.pkl
