@@ -1,0 +1,5 @@
+type: teleop
+start: 0
+end: None
+stop: 0
+ctx_path: ./data/move_rotate_z_dict_23dof.pkl

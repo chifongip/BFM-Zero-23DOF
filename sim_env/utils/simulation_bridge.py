@@ -25,6 +25,7 @@ class SimulationBridge:
         self.scene_config = scene_config
         robot_type = robot_config["ROBOT_TYPE"]
         supported_types = {
+            "g1_23dof",
             "g1_29dof",
             "h1",
             "go2",

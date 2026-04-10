@@ -243,6 +243,10 @@ class BFMZeroPolicy:
             if self.num_selected_goals ==1:
                 logger.info(colored(f"Only one goal is selected, make sure that is what you want", "red"))
 
+        elif self.task_type == "teleop":
+            with open(exp_config['ctx_path'], "rb") as f:
+                self.z_dict = pickle.load(f)
+            self.cmd_vel = np.zeros((1, 3))  # [vx, vy, wz]
 
     def setup_policy(self, model_path):
         # load onnx policy
@@ -283,6 +287,27 @@ class BFMZeroPolicy:
         self.state_dict["action"] = self.last_action
         for update_callback in self.update_callbacks:
             update_callback(self.state_dict)
+
+    def select_latent_z(self):
+        # 1. Extract raw values
+        vel_x = self.cmd_vel[0, 0]
+        ang_z = self.cmd_vel[0, 2]
+
+        # 2. Clip and Round to match the dict keys (steps of 0.1)
+        rounded_speed = round(np.clip(vel_x, 0.0, 1.0), 1) + 0.0
+        rounded_ang = round(np.clip(ang_z, -1.0, 1.0), 1) + 0.0
+
+        # 3. Format the key to match: "s_0.5_a_-0.2"
+        key = f"s_{rounded_speed:.1f}_a_{rounded_ang:.1f}"
+
+        # 4. Safely retrieve the latent z
+        latent_z = self.z_dict.get(key)
+
+        if latent_z is None:
+            # Fallback to a safe "Stay Still" state if key is missing
+            latent_z = self.z_dict.get("s_0.0_a_0.0")
+            
+        return latent_z
 
     def prepare_obs_for_rl(self):
         """Prepare observation for policy inference using observation classes"""
@@ -327,6 +352,10 @@ class BFMZeroPolicy:
                 print(f"obs={obs.shape}")
                 print(f"list(self.z_dict.values())[self.z_index]]={list(self.z_dict.values())[self.z_index].shape}")
                 raise e
+            
+        elif self.task_type == "teleop":
+            z = [self.select_latent_z().numpy()]
+            inputs = np.concatenate([obs, z], axis=-1).astype(np.float32)
 
         return obs_dict, inputs
 
@@ -433,6 +462,15 @@ class BFMZeroPolicy:
 
         if self.wc_msg is None:
             return
+
+        # Update cmd_vel based on joystick input
+        self.cmd_vel[0, 0] = self.wc_msg.left_stick[1]
+        self.cmd_vel[0, 1] = 0.0
+        self.cmd_vel[0, 2] = -self.wc_msg.right_stick[0]
+
+        # logger.info(colored(
+        #     f"Joystick lin_vel_command: {self.lin_vel_command}, ang_vel_command: {self.ang_vel_command}", "green"
+        # ))
 
         # print(f"wc_msg.A: {self.wc_msg.A}")
         if self.wc_msg.A and not self.last_wc_msg.A:
@@ -572,21 +610,22 @@ class BFMZeroPolicy:
             self.init_count = 0
             logger.info("Setting to init state")
         elif keycode == "w":
-            self.lin_vel_command[0, 0] += 0.1
+            self.cmd_vel[0, 0] = min(1.0, self.cmd_vel[0, 0] + 0.1)
+            logger.info(colored(f"Command velocity updated: {self.cmd_vel}", "green"))
         elif keycode == "s":
-            self.lin_vel_command[0, 0] -= 0.1
+            self.cmd_vel[0, 0] = max(0.0, self.cmd_vel[0, 0] - 0.1)
+            logger.info(colored(f"Command velocity updated: {self.cmd_vel}", "green"))
         elif keycode == "a":
-            self.lin_vel_command[0, 1] += 0.1
+            self.cmd_vel[0, 2] = min(1.0, self.cmd_vel[0, 2] + 0.1)
+            logger.info(colored(f"Command velocity updated: {self.cmd_vel}", "green"))
         elif keycode == "d":
-            self.lin_vel_command[0, 1] -= 0.1
-        elif keycode == "q":
-            self.ang_vel_command[0, 0] -= 0.1
-        elif keycode == "e":
-            self.ang_vel_command[0, 0] += 0.1
+            self.cmd_vel[0, 2] = max(-1.0, self.cmd_vel[0, 2] - 0.1)
+            logger.info(colored(f"Command velocity updated: {self.cmd_vel}", "green"))
         elif keycode == "z":
-            self.ang_vel_command[0, 0] = 0.0
-            self.lin_vel_command[0, 0] = 0.0
-            self.lin_vel_command[0, 1] = 0.0
+            self.cmd_vel[0, 0] = 0.0
+            self.cmd_vel[0, 1] = 0.0
+            self.cmd_vel[0, 2] = 0.0
+            logger.info(colored(f"Command velocity reset to zero", "green"))
         elif keycode == "5":
             self.command_sender.kp_level -= 0.01
             for i in range(len(self.command_sender.robot_kp)):

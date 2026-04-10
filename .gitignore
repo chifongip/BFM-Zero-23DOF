@@ -6,3 +6,6 @@ motivo_isaac.egg-info/
 results/
 .vscode/
 humanoidverse/
+data/*.npz
+data/*.pkl
+videos/
