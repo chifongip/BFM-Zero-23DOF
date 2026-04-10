@@ -68,4 +68,6 @@ Thumbs.db
 # static/
 model/
 videos/
-
+results/
+humanoidverse/data/*.pkl
+data/

@@ -56,6 +56,188 @@ class RewardFunction(abc.ABC):
         return sdata
 
 
+class MJWMoveAndRotateReward(RewardFunction):
+    move_speed: float = 1.0  # Linear velocity target
+    target_ang_velocity: float = 2.0  # Angular velocity target
+    axis: str = "z"  # Rotation axis
+    move_angle: float = 0  # Direction of movement
+    egocentric_target: bool = True
+    stand_height: float = 0.75
+
+    def compute(self, model: mujoco.MjModel, data: mujoco.MjData) -> float:
+        pelvis_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "pelvis")
+
+        # Get body states
+        root_height = wp.to_torch(data.xpos[:, pelvis_id])[:, -1]
+        center_of_mass_velocity = self.get_sensor_data(model, data, "torso_link_subtreelinvel")
+        angular_velocity = self.get_sensor_data(model, data, "imu-angular-velocity")
+        pelvis_xmat = wp.to_torch(data.xmat[:, pelvis_id])
+
+        standing = tolerance(
+            root_height,
+            bounds=(self.stand_height, float("inf")),
+            margin=self.stand_height,
+            value_at_margin=0.01,
+            sigmoid="linear",
+        )
+        upvector_torso = self.get_sensor_data(model, data, "upvector_torso")
+        cost_orientation = tolerance(
+            torch.sum(
+                torch.square(upvector_torso - torch.tensor([0.073, 0.0, 1.0], device=upvector_torso.device, dtype=upvector_torso.dtype)),
+                dim=-1,
+            ),
+            bounds=(0, 0.1),
+            margin=3,
+            value_at_margin=0,
+            sigmoid="linear",
+        )
+        stand_reward = standing * cost_orientation
+        small_control = 1.0
+
+        # Get torso rotation for alignment check
+        torso_rotation = pelvis_xmat[:, 2, :]
+
+        # ALIGNMENT CONSTRAINT (critical for rotation tracking!)
+        aligned = tolerance(
+            torso_rotation[:, COORD_TO_INDEX[self.axis]],
+            bounds=ALIGNMENT_BOUNDS[self.axis],
+            sigmoid="linear",
+            margin=0.9,
+            value_at_margin=0,
+        )
+
+        # SPECIAL CASE: When move_speed is very low (stationary or rotate-in-place)
+        if 0 <= self.move_speed <= 0.01:
+            # If also no rotation target, stay still (strict movement constraint)
+            if abs(self.target_ang_velocity) <= 0.01:
+                horizontal_velocity = center_of_mass_velocity[:, [0, 1]]
+                dont_move = tolerance(horizontal_velocity, margin=0.2).mean(dim=-1)
+                dont_rotate = tolerance(angular_velocity, margin=0.1).mean(dim=-1)
+                return small_control * stand_reward * dont_move * dont_rotate
+
+            # If rotation target exists, use LOOSER dont_move constraint
+            # (allows balancing movements needed for rotation)
+            horizontal_velocity = center_of_mass_velocity[:, [0, 1]]
+            dont_move = tolerance(horizontal_velocity, margin=1.0).mean(dim=-1)
+
+            direction = np.sign(self.target_ang_velocity)
+            targ_av = abs(self.target_ang_velocity)
+            if self.target_ang_velocity >= 0:
+                rotate = tolerance(
+                    direction * angular_velocity[:, COORD_TO_INDEX[self.axis]],
+                    bounds=(targ_av, targ_av + 0.2),
+                    margin=targ_av / 2,
+                    value_at_margin=0,
+                    sigmoid="linear",
+                )
+            else:
+                rotate = tolerance(
+                    direction * angular_velocity[:, COORD_TO_INDEX[self.axis]],
+                    bounds=(targ_av, targ_av + 0.05),
+                    margin=targ_av / 2,
+                    value_at_margin=0,
+                    sigmoid="linear",
+                )
+            return small_control * stand_reward * dont_move * rotate * aligned
+
+        # DIRECTION CALCULATION (for movement with target speed > 0.01)
+        if self.move_angle is not None:
+            move_angle = np.deg2rad(self.move_angle) * torch.ones(root_height.shape[0], device=root_height.device, dtype=root_height.dtype)
+        else:
+            move_angle = None
+
+        if self.egocentric_target and move_angle is not None:
+            euler = self.rot2eul(pelvis_xmat)
+            move_angle = move_angle + euler[:, -1]
+
+        # LINEAR VELOCITY REWARD
+        vel = center_of_mass_velocity[:, [0, 1]]
+        com_velocity = torch.norm(vel, dim=-1)
+        move = tolerance(
+            com_velocity,
+            bounds=(
+                self.move_speed - 0.1 * self.move_speed,
+                self.move_speed + 0.1 * self.move_speed,
+            ),
+            margin=self.move_speed / 2,
+            value_at_margin=0.5,
+            sigmoid="gaussian",
+        )
+        move = (5 * move + 1) / 6
+
+        # Check if we should focus only on movement (no rotation target)
+        if abs(self.target_ang_velocity) <= 0.01:
+            # When target rotation is zero, use movement reward with direction guidance
+            if move_angle is None:
+                return small_control * stand_reward * move
+            else:
+                direction = vel / (com_velocity + 1e-6).reshape(-1, 1).repeat(1, 2)
+                target_direction = torch.stack((torch.cos(move_angle), torch.sin(move_angle)), dim=-1)
+                dot = (target_direction * direction).sum(dim=-1)
+                angle_reward = (dot + 1.0) / 2.0
+                angle_reward = torch.where(torch.isclose(com_velocity, torch.zeros_like(com_velocity)), 1.0, angle_reward)
+                return small_control * stand_reward * move * angle_reward
+
+        # ANGULAR VELOCITY REWARD (when rotation target is significant)
+        direction = np.sign(self.target_ang_velocity)
+        targ_av = abs(self.target_ang_velocity)
+        if self.target_ang_velocity >= 0:
+            rotate = tolerance(
+                direction * angular_velocity[:, COORD_TO_INDEX[self.axis]],
+                bounds=(targ_av, targ_av + 0.02),
+                margin=targ_av / 2,
+                value_at_margin=0,
+                sigmoid="linear",
+            )
+        else:
+            rotate = tolerance(
+                direction * angular_velocity[:, COORD_TO_INDEX[self.axis]],
+                bounds=(targ_av, targ_av + 0.05),
+                margin=targ_av / 2,
+                value_at_margin=0,
+                sigmoid="linear",
+            )
+
+        # Combine rewards with ALIGNMENT constraint for better rotation tracking
+        # Higher rotation weight ensures better angular velocity tracking
+        combined_velocity = 0.8 * move + 0.2 * rotate
+        # combined_velocity = 0.5 * move + 0.5 * rotate
+
+        if move_angle is None:
+            return small_control * stand_reward * combined_velocity * aligned
+        else:
+            direction = vel / (com_velocity + 1e-6).reshape(-1, 1).repeat(1, 2)
+            target_direction = torch.stack((torch.cos(move_angle), torch.sin(move_angle)), dim=-1)
+            dot = (target_direction * direction).sum(dim=-1)
+            angle_reward = (dot + 1.0) / 2.0
+            angle_reward = torch.where(torch.isclose(com_velocity, torch.zeros_like(com_velocity)), 1.0, angle_reward)
+            return small_control * stand_reward * combined_velocity * angle_reward * aligned
+
+    def rot2eul(self, R: torch.Tensor) -> torch.Tensor:
+        """Convert rotation matrix to Euler angles (same as MJWLocomotionReward)"""
+        beta = -torch.arcsin(R[:, 2, 0])
+        alpha = torch.atan2(R[:, 2, 1] / torch.cos(beta), R[:, 2, 2] / torch.cos(beta))
+        gamma = torch.atan2(R[:, 1, 0] / torch.cos(beta), R[:, 0, 0] / torch.cos(beta))
+        x = torch.concatenate((alpha.reshape(-1, 1), beta.reshape(-1, 1), gamma.reshape(-1, 1)), dim=-1)
+        return x
+
+    @staticmethod
+    def reward_from_name(name: str) -> tp.Optional["RewardFunction"]:
+        pattern = r"^move-rotate-(-?\d+\.*\d*)-(-?\d+\.*\d*)-(x|y|z)-(-?\d+\.*\d*)$"
+        match = re.search(pattern, name)
+        if match:
+            move_speed, target_ang_velocity, axis, move_angle = (
+                float(match.group(1)), float(match.group(2)), match.group(3), float(match.group(4))
+            )
+            return MJWMoveAndRotateReward(
+                move_speed=move_speed,
+                target_ang_velocity=target_ang_velocity,
+                axis=axis,
+                move_angle=move_angle
+            )
+        return None
+
+
 class MJWLocomotionReward(RewardFunction):
     move_speed: float = 5
     # Head height of G1 robot after "Default" reset is 1.22
